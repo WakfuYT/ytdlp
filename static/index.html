@@ -87,6 +87,16 @@
     padding: 10px 22px; font-weight: 600;
   }
 
+  .prog { margin-top: 18px; }
+  .prog[hidden] { display: none; }
+  .track { height: 6px; background: var(--line); border-radius: 999px; overflow: hidden; }
+  .bar { height: 100%; width: 0; background: var(--accent); border-radius: 999px; transition: width .35s ease; }
+  .bar.busy { width: 35% !important; animation: slide 1.1s ease-in-out infinite; }
+  @keyframes slide { 0% { margin-left: -35%; } 100% { margin-left: 100%; } }
+  .ptext { margin-top: 8px; font-size: 13px; color: var(--muted); display: flex; justify-content: space-between; }
+  .ptext.error { color: var(--danger); }
+
+  @media (prefers-reduced-motion: reduce) { .bar.busy { animation: none; } }
   @media (max-width: 520px) {
     main { padding-top: 10vh; }
     .meta { flex-direction: column; }
@@ -122,6 +132,12 @@
       <span class="grow"></span>
       <button id="download" class="go">Download</button>
     </div>
+    <div id="prog" class="prog" hidden>
+      <div class="track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="track">
+        <div id="bar" class="bar"></div>
+      </div>
+      <div id="ptext" class="ptext"><span id="plabel"></span><span id="ppct"></span></div>
+    </div>
   </section>
 </main>
 
@@ -129,7 +145,10 @@
   const $ = (id) => document.getElementById(id);
   const urlEl = $("url"), parseBtn = $("parse"), statusEl = $("status"), card = $("card");
   const qualityEl = $("quality"), dlBtn = $("download");
+  const prog = $("prog"), bar = $("bar"), track = $("track"), plabel = $("plabel"), ppct = $("ppct"), ptext = $("ptext");
   let mode = "video";
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   function setStatus(msg, isError) {
     statusEl.textContent = msg || "";
@@ -151,12 +170,22 @@
     $("m-audio").setAttribute("aria-pressed", m === "audio");
     qualityEl.hidden = m === "audio";
   }
+  function showProgress(label, pct, busy, isError) {
+    prog.hidden = false;
+    bar.classList.toggle("busy", !!busy);
+    if (!busy) bar.style.width = pct + "%";
+    track.setAttribute("aria-valuenow", Math.round(pct));
+    ptext.classList.toggle("error", !!isError);
+    plabel.textContent = label;
+    ppct.textContent = busy || isError ? "" : Math.round(pct) + "%";
+  }
 
   async function parse() {
     const url = urlEl.value.trim();
     if (!url) return setStatus("Paste a video link first.", true);
     parseBtn.disabled = true;
     card.hidden = true;
+    prog.hidden = true;
     setStatus("Reading video details...");
     try {
       const r = await fetch("/api/info", {
@@ -184,26 +213,38 @@
 
   async function download() {
     dlBtn.disabled = true;
-    setStatus("Preparing your file. Longer videos take a moment...");
+    setStatus("");
+    showProgress("Starting...", 0, true);
     try {
-      const q = new URLSearchParams({ url: urlEl.value.trim(), mode, height: qualityEl.value });
-      const r = await fetch("/api/download?" + q);
-      if (!r.ok) throw new Error((await r.json()).error || "Download failed.");
-      const cd = r.headers.get("Content-Disposition") || "";
-      const star = /filename\*=UTF-8''([^;]+)/i.exec(cd);
-      const plain = /filename="?([^";]+)"?/i.exec(cd);
-      const name = star ? decodeURIComponent(star[1]) : plain ? plain[1] : "download";
-      const blob = await r.blob();
+      const r = await fetch("/api/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: urlEl.value.trim(), mode, height: qualityEl.value }),
+      });
+      const start = await r.json();
+      if (!r.ok) throw new Error(start.error || "Download failed.");
+
+      while (true) {
+        await sleep(500);
+        const pr = await fetch("/api/progress/" + start.id);
+        const p = await pr.json();
+        if (!pr.ok) throw new Error(p.error || "Download failed.");
+        if (p.status === "error") throw new Error(p.error || "Download failed.");
+        if (p.status === "done") break;
+        if (p.stage === "processing") showProgress("Processing the file...", 99, true);
+        else if (p.stage === "downloading") showProgress("Downloading", p.percent, false);
+        else showProgress("Starting...", 0, true);
+      }
+
+      showProgress("Done", 100, false);
       const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = name;
+      a.href = "/api/file/" + start.id;
       document.body.appendChild(a);
       a.click();
       a.remove();
-      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
-      setStatus("Download started.");
+      plabel.textContent = "Done. Your file is saving.";
     } catch (e) {
-      setStatus(e.message, true);
+      showProgress(e.message, 0, false, true);
     } finally {
       dlBtn.disabled = false;
     }
